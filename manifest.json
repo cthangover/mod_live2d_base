@@ -1,0 +1,10 @@
+{
+    "id": "live2d",
+    "name": "Live2D Cubism",
+    "version": "1.0.0",
+    "author": "ct",
+    "description": "Live2D Cubism C# runtime: model loading, rendering, physics, animation, effects",
+    "depends": ["core>=1"],
+    "depends_native": ["native/*.dll"],
+    "sources": ["src/*.cs"]
+}

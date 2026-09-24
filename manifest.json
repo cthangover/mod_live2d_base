@@ -4,6 +4,7 @@
     "version": "1.0.0",
     "author": "ct",
     "description": "Live2D Cubism C# runtime: model loading, rendering, physics, animation, effects",
+    "category": "library, visual",
     "depends": ["core>=1"],
     "depends_native": ["native/*.dll"],
     "sources": ["src/*.cs"]

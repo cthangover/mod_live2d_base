@@ -1,17 +1,21 @@
 using System;
+using System.Collections.Generic;
 
 namespace Cthangover.Live2D.Cubism.Framework
 {
     /// <summary>
     /// Abstract base for all Live2D Cubism motions (animations and expressions).
-    /// Provides fade-in/fade-out timing, looping, weight blending, and event
-    /// callbacks shared across <see cref="CubismMotion"/> and
-    /// <see cref="CubismExpressionMotion"/>.
-    /// 
-    /// Motions are managed by <see cref="CubismMotionQueueManager"/>, which
-    /// calls <see cref="SetupMotionQueueEntry"/> on start, then
-    /// <see cref="UpdateFadeWeight"/> and <see cref="DoUpdateParameters"/>
-    /// every frame.
+    /// Порт ACubismMotion из Cubism SDK for Native 5-r.5: владеет временами фейда,
+    /// весом, цикличностью и колбэками; очередь (<see cref="CubismMotionQueueManager"/>)
+    /// вызывает <see cref="UpdateParameters"/> раз в кадр, тот в свою очередь —
+    /// <see cref="SetupMotionQueueEntry"/> (при старте), <see cref="UpdateFadeWeight"/>
+    /// и виртуальный <see cref="DoUpdateParameters"/>.
+    ///
+    /// Завершение выставляется по EndTime: сам моушен ставит IsFinished в
+    /// DoUpdateParameters (незацикленный), а обёртка <see cref="UpdateParameters"/>
+    /// после применения параметров закрывает запись, когда текущее время прошло EndTime
+    /// (например, после запущенного через очередь fade-out). Колбэки при этом не
+    /// дублируются: OnFinishedMotion вызывается только самим моушеном.
     /// </summary>
     public abstract class ACubismMotion
     {
@@ -35,6 +39,9 @@ namespace Cthangover.Live2D.Cubism.Framework
         protected bool _isLoop;
         protected bool _isLoopFadeIn = true;
         protected bool _previousLoopState;
+
+        /// <summary>Сработавшие события (UserData); наполняется в <see cref="GetFiredEvent"/>.</summary>
+        protected readonly List<string> _firedEventValues = new();
 
         /// <summary>
         /// Duration of the fade-in transition in seconds.
@@ -75,8 +82,8 @@ namespace Cthangover.Live2D.Cubism.Framework
 
         /// <summary>
         /// Invoked when the motion finishes (non-looping only).
-        /// Automatically called by <see cref="CubismMotion.DoUpdateParameters"/>
-        /// when timeOffset exceeds duration.
+        /// Автоматически вызывается самим моушеном в DoUpdateParameters по достижении
+        /// длительности; очередь этот колбэк не дублирует.
         /// </summary>
         public FinishedMotionCallback OnFinishedMotion { get; set; }
 
@@ -101,73 +108,111 @@ namespace Cthangover.Live2D.Cubism.Framework
         public virtual float GetLoopDuration() => -1f;
 
         /// <summary>
-        /// Initializes a queue entry with start/end times based on current
-        /// <see cref="FadeInSeconds"/>, <see cref="OffsetSeconds"/>,
-        /// and <see cref="GetDuration"/>. Fires <see cref="OnBeganMotion"/>.
+        /// Порт ACubismMotion::UpdateParameters — кадровая обёртка, вызываемая очередью.
+        /// Проверяет доступность записи, инициализирует её при старте, считает fade-вес,
+        /// применяет параметры и после этого закрывает запись, если время прошло EndTime.
         /// </summary>
-        public void SetupMotionQueueEntry(CubismMotionQueueEntry entry, float userTimeSeconds)
+        public void UpdateParameters(CubismNativeModel model, CubismMotionQueueEntry entry, float userTimeSeconds)
         {
-            var fadeIn = _fadeInSeconds >= 0f ? _fadeInSeconds : 1f;
-            entry.StartTime = userTimeSeconds - _offsetSeconds;
-            entry.FadeInStartTime = userTimeSeconds;
-            var duration = GetDuration();
-            UpdateEndTime(entry, duration);
-            OnBeganMotion?.Invoke(this);
-        }
-
-        /// <summary>
-        /// Computes the final frame weight = <see cref="Weight"/> x fadeIn x fadeOut.
-        /// Fade curves use the sine easing function from <see cref="CubismMath.GetEasingSine"/>.
-        /// </summary>
-        public float UpdateFadeWeight(CubismMotionQueueEntry entry, float userTimeSeconds)
-        {
-            var fadeIn = GetFadeIn(entry, userTimeSeconds);
-            var fadeOut = GetFadeOut(entry, userTimeSeconds);
-            return _weight * fadeIn * fadeOut;
-        }
-
-        private float GetFadeIn(CubismMotionQueueEntry entry, float userTimeSeconds)
-        {
-            var fadeInTime = _fadeInSeconds >= 0f ? _fadeInSeconds : 1f;
-            if (fadeInTime <= 0f) return 1f;
-            var t = (userTimeSeconds - entry.FadeInStartTime) / fadeInTime;
-            return CubismMath.GetEasingSine(t);
-        }
-
-        private float GetFadeOut(CubismMotionQueueEntry entry, float userTimeSeconds)
-        {
-            var fadeOutTime = _fadeOutSeconds >= 0f ? _fadeOutSeconds : 1f;
-            if (fadeOutTime <= 0f) return 1f;
-            var t = (entry.EndTime - userTimeSeconds) / fadeOutTime;
-            return CubismMath.GetEasingSine(t);
-        }
-
-        /// <summary>
-        /// Sets the queue entry's EndTime based on loop state and duration.
-        /// Looping motions get EndTime = -1 (infinite).
-        /// </summary>
-        protected void UpdateEndTime(CubismMotionQueueEntry entry, float duration)
-        {
-            entry.EndTime = _isLoop ? -1f : entry.StartTime + duration;
-        }
-
-        /// <summary>
-        /// Recalculates EndTime when <see cref="IsLoop"/> changes mid-playback.
-        /// Called by <see cref="CubismMotion.DoUpdateParameters"/> every frame
-        /// to detect loop state transitions.
-        /// </summary>
-        protected void AdjustEndTime(CubismMotionQueueEntry entry, float duration)
-        {
-            if (_isLoop != _previousLoopState)
+            if (!entry.IsAvailable || entry.IsFinished)
             {
-                _previousLoopState = _isLoop;
-                UpdateEndTime(entry, duration);
+                return;
+            }
+
+            SetupMotionQueueEntry(entry, userTimeSeconds);
+
+            float fadeWeight = UpdateFadeWeight(entry, userTimeSeconds);
+
+            DoUpdateParameters(model, userTimeSeconds, fadeWeight, entry);
+
+            // Пост-проверка SDK: EndTime > 0 и уже пройден — запись завершена.
+            if ((entry.EndTime > 0f) && (entry.EndTime < userTimeSeconds))
+            {
+                entry.IsFinished = true;
             }
         }
 
         /// <summary>
+        /// Порт ACubismMotion::SetupMotionQueueEntry: при первом кадре записывает
+        /// StartTime (с учётом OffsetSeconds), FadeInStartTime и EndTime
+        /// (если EndTime ещё не выставлен извне, например фейдаутом от очереди).
+        /// </summary>
+        public void SetupMotionQueueEntry(CubismMotionQueueEntry entry, float userTimeSeconds)
+        {
+            if (!entry.IsAvailable || entry.IsFinished)
+            {
+                return;
+            }
+
+            if (entry.IsStarted)
+            {
+                return;
+            }
+
+            entry.IsStarted = true;
+            entry.StartTime = userTimeSeconds - _offsetSeconds;
+            entry.FadeInStartTime = userTimeSeconds;
+
+            // EndTime мог быть выставлен заранее (SetFadeout до старта).
+            if (entry.EndTime < 0f)
+            {
+                AdjustEndTime(entry);
+            }
+
+            OnBeganMotion?.Invoke(this);
+        }
+
+        /// <summary>
+        /// Порт ACubismMotion::UpdateFadeWeight: вес = Weight x fadeIn x fadeOut
+        /// с синус-эйзингом. При fadeIn/fadeOut == 0 соответствующий множитель = 1.
+        /// </summary>
+        public float UpdateFadeWeight(CubismMotionQueueEntry entry, float userTimeSeconds)
+        {
+            if (entry == null)
+            {
+                return -1f;
+            }
+
+            float fadeWeight = _weight;
+
+            float fadeIn = _fadeInSeconds == 0f
+                ? 1f
+                : CubismMath.GetEasingSine((userTimeSeconds - entry.FadeInStartTime) / _fadeInSeconds);
+
+            float fadeOut = (_fadeOutSeconds == 0f || entry.EndTime < 0f)
+                ? 1f
+                : CubismMath.GetEasingSine((entry.EndTime - userTimeSeconds) / _fadeOutSeconds);
+
+            fadeWeight = fadeWeight * fadeIn * fadeOut;
+
+            entry.SetState(userTimeSeconds, fadeWeight);
+
+            return fadeWeight;
+        }
+
+        /// <summary>
+        /// Порт ACubismMotion::AdjustEndTime: EndTime = StartTime + GetDuration();
+        /// для цикличных моушенов (GetDuration() <= 0) EndTime = -1 (бесконечность).
+        /// </summary>
+        protected void AdjustEndTime(CubismMotionQueueEntry entry)
+        {
+            float duration = GetDuration();
+            float endTime = duration <= 0f ? -1f : entry.StartTime + duration;
+            entry.EndTime = endTime;
+        }
+
+        /// <summary>
+        /// Порт ACubismMotion::GetFiredEvent: базовая реализация не содержит событий.
+        /// <see cref="CubismMotion"/> переопределяет и наполняет список по UserData.
+        /// </summary>
+        public virtual List<string> GetFiredEvent(float beforeCheckTimeSeconds, float motionTimeSeconds)
+        {
+            return _firedEventValues;
+        }
+
+        /// <summary>
         /// Applies motion parameter values to the model for the current frame.
-        /// Called every frame by <see cref="CubismMotionQueueManager.DoUpdateMotion"/>.
+        /// Called every frame by <see cref="ACubismMotion.UpdateParameters"/>.
         /// </summary>
         /// <param name="model">The native Cubism model to modify.</param>
         /// <param name="userTimeSeconds">Elapsed user time in seconds.</param>

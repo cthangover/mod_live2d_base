@@ -19,6 +19,22 @@ namespace Cthangover.Live2D.Cubism.Framework
     public enum CubismMotionSegmentType { Linear = 0, Bezier = 1, Stepped = 2, InverseStepped = 3 }
 
     /// <summary>
+    /// Данные одного сегмента кривой — порт CubismMotionSegment из CubismMotionInternal.hpp:
+    /// индекс первой контрольной точки в общем плоском массиве точек и тип интерполяции.
+    /// Соседние сегменты кривой разделяют общую точку: BasePointIndex следующего сегмента
+    /// равен индексу последней точки предыдущего, а оценка кривой ищет сегмент по времени
+    /// первой точки СЛЕДУЮЩЕГО сегмента.
+    /// </summary>
+    internal struct MotionSegmentData
+    {
+        /// <summary>Индекс первой контрольной точки сегмента в CubismMotion._points.</summary>
+        public int BasePointIndex;
+
+        /// <summary>Тип сегмента (Linear/Bezier/Stepped/InverseStepped).</summary>
+        public CubismMotionSegmentType SegmentType;
+    }
+
+    /// <summary>
     /// A time-value pair representing a keyframe or control point on a motion curve.
     /// </summary>
     [StructLayout(LayoutKind.Sequential)]

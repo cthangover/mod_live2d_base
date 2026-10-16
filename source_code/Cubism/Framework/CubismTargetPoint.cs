@@ -6,21 +6,20 @@ namespace Cthangover.Live2D.Cubism.Framework
     /// Smooth target-point tracking for face/eye movement parameters.
     /// Drives the ParamAngleX/Y and ParamEyeBallX/Y model parameters in
     /// <see cref="CubismModelNode"/>.
-    /// 
-    /// Uses a velocity-based smoothing approach: each update computes a
-    /// desired velocity toward the target, applies acceleration limits,
-    /// enforces a maximum safe approach speed to prevent overshoot near
-    /// the target, and integrates velocity into position.
-    /// 
-    /// The tracking is frame-rate independent — delta time is scaled by
-    /// a factor of 30 (matching Cubism's internal 30fps reference).
-    /// Acceleration and max velocity are clamped per Cubism SDK conventions
-    /// (FaceParamMaxV = 40, FrameToMaxSpeed = 4.5).
+    ///
+    /// Bit-exact port of Cubism SDK for Native 5-r.5 Math/CubismTargetPoint.cpp:
+    /// a velocity-based follower that accelerates toward the target with a
+    /// capped acceleration (reaching top speed in 0.15 s), then smoothly
+    /// decelerates so the configured acceleration can still brake before the
+    /// target. All time is expressed in internal 30 fps frame units.
     /// </summary>
     public class CubismTargetPoint
     {
-        private const float FaceParamMaxV = 40f;
-        private const float FrameToMaxSpeed = 4.5f;
+        /// <summary>Internal reference frame rate (SDK FrameRate).</summary>
+        private const int FrameRate = 30;
+
+        /// <summary>Threshold below which no movement is applied (SDK Epsilon).</summary>
+        private const float Epsilon = 0.01f;
 
         private float _faceTargetX, _faceTargetY;
         private float _faceX, _faceY;
@@ -45,54 +44,92 @@ namespace Cthangover.Live2D.Cubism.Framework
         }
 
         /// <summary>
-        /// Advances the smoothing simulation by one frame.
-        /// Computes delta-time-weighted velocity toward target, applies
-        /// acceleration clamping and safe approach speed limiting, then
-        /// integrates position.
-        /// 
-        /// Called each frame from <see cref="CubismModelNode.OnUpdate"/>
-        /// before injecting face-tracking parameters.
+        /// Advances the smoothing simulation by one frame (SDK CubismTargetPoint::Update).
+        /// The very first call only anchors the internal clock and performs no
+        /// integration, matching the native implementation.
         /// </summary>
         public void Update(float deltaTimeSeconds)
         {
+            // Add the delta time.
             _userTimeSeconds += deltaTimeSeconds;
-            var deltaTimeWeight = (_userTimeSeconds - _lastTimeSeconds) * 30f;
+
+            // The average speed of swinging the head from center to side is about 1 second.
+            // Considering acceleration/deceleration, twice that is the maximum speed.
+            // The face direction is 0.0 at center and +-1.0 at the sides.
+            const float FaceParamMaxV = 40f / 10f;                          // Moves 40 in 7.5 seconds (5.3/sc)
+            float MaxV = FaceParamMaxV * 1f / FrameRate;                    // Upper speed limit per frame
+
+            // First call only anchors the clock; no integration (SDK behavior).
+            if (_lastTimeSeconds == 0f)
+            {
+                _lastTimeSeconds = _userTimeSeconds;
+                return;
+            }
+
+            float deltaTimeWeight = (_userTimeSeconds - _lastTimeSeconds) * FrameRate;
             _lastTimeSeconds = _userTimeSeconds;
 
-            if (deltaTimeWeight <= 0f) return;
+            // Time until maximum speed, expressed in internal frames.
+            const float TimeToMaxSpeed = 0.15f;
+            const float FrameToMaxSpeed = TimeToMaxSpeed * FrameRate;       // sec * frame/sec
+            float MaxA = deltaTimeWeight * MaxV / FrameToMaxSpeed;          // Acceleration per frame
 
-            var maxV = FaceParamMaxV / 30f;
-            var maxA = deltaTimeWeight * maxV / FrameToMaxSpeed;
+            // The target direction is the vector (dx, dy).
+            float dx = _faceTargetX - _faceX;
+            float dy = _faceTargetY - _faceY;
 
-            var dx = _faceTargetX - _faceX;
-            var dy = _faceTargetY - _faceY;
-            var distance = MathF.Sqrt(dx * dx + dy * dy);
-            if (distance < 0.01f) return;
-
-            var vx = maxV * dx / distance;
-            var vy = maxV * dy / distance;
-
-            var ax = vx - _faceVX;
-            var ay = vy - _faceVY;
-            var aLen = MathF.Sqrt(ax * ax + ay * ay);
-            if (aLen > 0f)
+            if (MathF.Abs(dx) <= Epsilon && MathF.Abs(dy) <= Epsilon)
             {
-                var clampedA = MathF.Min(aLen, maxA);
-                ax = ax * clampedA / aLen;
-                ay = ay * clampedA / aLen;
+                return; // No change.
             }
 
-            var maxSafeV = 0.5f * (MathF.Sqrt(maxA * maxA + 8f * maxA * distance) - maxA);
-            var vLen = MathF.Sqrt(_faceVX * _faceVX + _faceVY * _faceVY);
-            if (vLen > maxSafeV && vLen > 0f)
+            // Slow down when the distance requires more than the maximum speed.
+            float d = MathF.Sqrt((dx * dx) + (dy * dy));
+
+            // Maximum speed vector toward the target.
+            float vx = MaxV * dx / d;
+            float vy = MaxV * dy / d;
+
+            // Acceleration needed to change from the current velocity to the new one.
+            float ax = vx - _faceVX;
+            float ay = vy - _faceVY;
+
+            float a = MathF.Sqrt((ax * ax) + (ay * ay));
+
+            // While accelerating.
+            if (a < -MaxA || a > MaxA)
             {
-                var scale = maxSafeV / vLen;
-                _faceVX *= scale;
-                _faceVY *= scale;
+                ax *= MaxA / a;
+                ay *= MaxA / a;
             }
 
+            // Add the acceleration to the original velocity to get the new velocity.
             _faceVX += ax;
             _faceVY += ay;
+
+            // When approaching the target direction, decelerate smoothly:
+            // from the relation between acceleration, speed and distance, compute
+            // the maximum speed that can still be stopped with the configured
+            // acceleration, and clamp the current speed to it.
+            {
+                // Relation between acceleration, velocity and distance.
+                //            2  6           2               3
+                //      sqrt(a  t  + 16 a h t  - 8 a h) - a t
+                // v = --------------------------------------
+                //                    2
+                //                 4 t  - 2
+                // (t=1)
+                float maxV = 0.5f * (MathF.Sqrt((MaxA * MaxA) + 16f * MaxA * d - 8f * MaxA * d) - MaxA);
+                float curV = MathF.Sqrt((_faceVX * _faceVX) + (_faceVY * _faceVY));
+
+                if (curV > maxV)
+                {
+                    // Current speed > maximum speed: decelerate to the maximum.
+                    _faceVX *= maxV / curV;
+                    _faceVY *= maxV / curV;
+                }
+            }
+
             _faceX += _faceVX;
             _faceY += _faceVY;
         }

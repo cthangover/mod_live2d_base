@@ -1,4 +1,4 @@
-﻿using Godot;
+using Godot;
 using Cthangover.Live2D.Cubism.Framework;
 
 namespace Cthangover.Live2D.Cubism.Services
@@ -19,6 +19,13 @@ namespace Cthangover.Live2D.Cubism.Services
         public float AnchorX = 0.5f;
         public float AnchorY = 0.5f;
         public FitMode ScaleFit = FitMode.FitAuto;
+
+        /// <summary>
+        /// Enables the automatic eye-blink effect. Disable for pixel-deterministic
+        /// rendering (screenshot/visual tests): the blink fires on a random timer
+        /// and would otherwise change pixels between captures.
+        /// </summary>
+        public bool EnableEyeBlink = true;
     }
 
     /// <summary>
@@ -68,7 +75,8 @@ namespace Cthangover.Live2D.Cubism.Services
                 Name = config.NodeName,
                 AnchorX = config.AnchorX,
                 AnchorY = config.AnchorY,
-                ScaleFit = fitMode
+                ScaleFit = fitMode,
+                EnableEyeBlink = config.EnableEyeBlink
             };
 
             parent.AddChild(model);

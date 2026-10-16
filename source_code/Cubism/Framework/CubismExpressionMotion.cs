@@ -1,4 +1,3 @@
-using System;
 using System.Collections.Generic;
 using System.Text.Json;
 
@@ -30,19 +29,27 @@ namespace Cthangover.Live2D.Cubism.Framework
     /// <summary>
     /// Expression motion, parsed from a Cubism .exp3.json file.
     /// Inherits fade and weight management from <see cref="ACubismMotion"/>.
-    /// 
-    /// Expressions are single-frame poses that transition between values using
-    /// one of three blend modes per parameter:
+    ///
+    /// Формулы применения — точный порт CubismExpressionMotion::DoUpdateParameters
+    /// через Set/Add/MultiplyParameterValue из CubismModel (SDK 5-r.5), weight — fade-вес:
     /// <list type="bullet">
-    ///   <item><see cref="ExpressionBlendType.Additive"/> — adds <c>value * weight</c></item>
-    ///   <item><see cref="ExpressionBlendType.Multiply"/> — multiplies by <c>1 + value * weight</c></item>
-    ///   <item><see cref="ExpressionBlendType.Overwrite"/> — lerps from current to target using weight</item>
+    ///   <item><see cref="ExpressionBlendType.Additive"/> — <c>value + expValue * weight</c></item>
+    ///   <item><see cref="ExpressionBlendType.Multiply"/> — <c>value * (1 + (expValue - 1) * weight)</c></item>
+    ///   <item><see cref="ExpressionBlendType.Overwrite"/> — <c>value * (1 - weight) + expValue * weight</c></item>
     /// </list>
-    /// 
-    /// Loaded and started by <see cref="CubismModelNode.StartExpression"/>.
+    ///
+    /// Как и в SDK, результат зажимается в [min, max] параметра (порт
+    /// CubismModel::SetParameterValue), а параметры применяются в порядке их
+    /// перечисления в exp3.json: при нескольких записях с одним Id побеждает последняя.
+    /// Fade-время по умолчанию — 1 c (DefaultFadeTime), если в файле не задано.
+    ///
+    /// Загружается и запускается через <see cref="CubismModelNode.StartExpression"/>.
     /// </summary>
     public class CubismExpressionMotion : ACubismMotion
     {
+        /// <summary>Порт DefaultFadeTime из CubismExpressionMotion.cpp.</summary>
+        private const float DefaultFadeTime = 1f;
+
         private readonly List<ExpressionParameter> _parameters = new();
 
         /// <summary>
@@ -55,23 +62,23 @@ namespace Cthangover.Live2D.Cubism.Framework
             var json = JsonDocument.Parse(jsonBytes);
             var root = json.RootElement;
 
-            if (root.TryGetProperty("FadeInTime", out var fi))
-                _fadeInSeconds = fi.GetSingle();
-            if (root.TryGetProperty("FadeOutTime", out var fo))
-                _fadeOutSeconds = fo.GetSingle();
+            // Порт CubismExpressionMotion::Parse: root[FadeInTime].ToFloat(DefaultFadeTime).
+            _fadeInSeconds = root.TryGetProperty("FadeInTime", out var fi) && fi.ValueKind == JsonValueKind.Number ? fi.GetSingle() : DefaultFadeTime;
+            _fadeOutSeconds = root.TryGetProperty("FadeOutTime", out var fo) && fo.ValueKind == JsonValueKind.Number ? fo.GetSingle() : DefaultFadeTime;
 
             if (root.TryGetProperty("Parameters", out var paramsArr))
             {
                 foreach (var p in paramsArr.EnumerateArray())
                 {
-                    var blend = p.TryGetProperty("Blend", out var b)
+                    // "Blend": null or absent -> Additive (SDK ToBlendFunction default).
+                    var blend = p.TryGetProperty("Blend", out var b) && b.ValueKind == JsonValueKind.String
                         ? ParseBlendType(b.GetString())
                         : ExpressionBlendType.Additive;
 
                     _parameters.Add(new ExpressionParameter
                     {
                         ParameterId = p.GetProperty("Id").GetString(),
-                        Value = p.GetProperty("Value").GetSingle(),
+                        Value = p.TryGetProperty("Value", out var val) && val.ValueKind == JsonValueKind.Number ? val.GetSingle() : 0f,
                         BlendType = blend
                     });
                 }
@@ -96,30 +103,41 @@ namespace Cthangover.Live2D.Cubism.Framework
             var values = model.GetParameterValues();
             var minValues = model.GetParameterMinimumValues();
             var maxValues = model.GetParameterMaximumValues();
-            var defaultValues = model.GetParameterDefaultValues();
 
-            for (int pi = 0; pi < model.ParameterCount; pi++)
+            var indexById = new Dictionary<string, int>(model.ParameterCount);
+            for (int i = 0; i < model.ParameterCount; i++)
+                indexById[CubismNativeModel.ReadStringFromPtrArray(idsPtr, i)] = i;
+
+            // Порт: цикл по параметрам выражения (в порядке exp3.json).
+            foreach (var ep in _parameters)
             {
-                var pid = CubismNativeModel.ReadStringFromPtrArray(idsPtr, pi);
-                foreach (var ep in _parameters)
-                {
-                    if (ep.ParameterId != pid) continue;
+                if (!indexById.TryGetValue(ep.ParameterId, out int pi)) continue;
 
-                    switch (ep.BlendType)
-                    {
-                        case ExpressionBlendType.Additive:
-                            values[pi] = values[pi] + ep.Value * weight;
-                            break;
-                        case ExpressionBlendType.Multiply:
-                            values[pi] = values[pi] * (1f + ep.Value * weight);
-                            break;
-                        case ExpressionBlendType.Overwrite:
-                            values[pi] = values[pi] * (1f - weight) + ep.Value * weight;
-                            break;
-                    }
-                    break;
+                switch (ep.BlendType)
+                {
+                    case ExpressionBlendType.Additive:
+                        // AddParameterValue: value + (expValue * weight)
+                        values[pi] = ClampParameterValue(values[pi] + ep.Value * weight, minValues[pi], maxValues[pi]);
+                        break;
+                    case ExpressionBlendType.Multiply:
+                        // MultiplyParameterValue: value * (1 + (expValue - 1) * weight)
+                        values[pi] = ClampParameterValue(values[pi] * (1f + (ep.Value - 1f) * weight), minValues[pi], maxValues[pi]);
+                        break;
+                    case ExpressionBlendType.Overwrite:
+                        // SetParameterValue(id, value, weight): expValue зажимается, затем лерп
+                        values[pi] = values[pi] * (1f - weight)
+                            + ClampParameterValue(ep.Value, minValues[pi], maxValues[pi]) * weight;
+                        break;
                 }
             }
+        }
+
+        /// <summary>Порт GetParameterClampValue — зажим значения параметра в [min, max].</summary>
+        private static float ClampParameterValue(float value, float min, float max)
+        {
+            if (value < min) return min;
+            if (value > max) return max;
+            return value;
         }
     }
 }

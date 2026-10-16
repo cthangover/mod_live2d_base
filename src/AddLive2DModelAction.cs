@@ -4,6 +4,7 @@ using Cthangover.Core.Utils;
 using Godot;
 using Cthangover.Live2D.Cubism.Services;
 
+using Cthangover.Mods.Interface.View;
 namespace Mods.Live2D
 {
     public class AddLive2DModelAction : IScenarioAction

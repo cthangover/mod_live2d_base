@@ -3,6 +3,7 @@ using System.Buffers.Binary;
 using System.Collections.Generic;
 using Cthangover.Core.Utils;
 using Godot;
+using Cthangover.Core.Mods.Resolvers;
 using Cthangover.Live2D.Cubism.Core;
 
 namespace Cthangover.Live2D.Cubism.Framework
@@ -187,9 +188,18 @@ namespace Cthangover.Live2D.Cubism.Framework
                 GameLogger.Log("LIVE2D", $"BuildModel: drawable[{di}] opacity={opacity:F3}");
 
                 var shader = ResolveShaderForDrawable(di, constantFlags, maskCounts);
+                if (shader == null)
+                {
+                    // Shader failed to resolve — skip this drawable instead of
+                    // building a material-less mesh (guards downstream NREs and
+                    // keeps the rest of the model rendering).
+                    GameLogger.Log("LIVE2D", $"BuildModel: drawable[{di}] SKIPPED — shader not resolved", LogLevel.Error);
+                    _meshInstances[di] = null;
+                    _materials[di] = null;
+                    continue;
+                }
 
-                ShaderMaterial mat = null;
-                if (shader != null)
+                ShaderMaterial mat;
                 {
                     mat = new ShaderMaterial { Shader = shader };
                     mat.SetShaderParameter("color_base", new Color(1f, 1f, 1f, 1f));
@@ -221,15 +231,8 @@ namespace Cthangover.Live2D.Cubism.Framework
                     mi.Material = mat;
                 }
 
-                if (texture != null)
-                {
-                    mat.SetShaderParameter("tex_main", texture);
-                    GameLogger.Log("LIVE2D", $"BuildModel: drawable[{di}] texture Ok");
-                }
-                else
-                {
-                    GameLogger.Log("LIVE2D", $"BuildModel: drawable[{di}] texture MISSING (texIndex={texIndex})");
-                }
+                if (texture == null)
+                    GameLogger.Log("LIVE2D", $"BuildModel: drawable[{di}] texture MISSING (texIndex={texIndex})", LogLevel.Warning);
 
                 mi.Visible = true;
                 _parentNode.AddChild(mi);
@@ -428,6 +431,8 @@ namespace Cthangover.Live2D.Cubism.Framework
             var maskTexIndex = model.GetTextureIndices()[drawableIndex];
             var texture = maskTexIndex >= 0 && maskTexIndex < model.Textures.Length ? model.Textures[maskTexIndex] : null;
 
+            mi2d.Mesh = mesh;
+
             var shader = ResolveShader("2d_cubism_mask");
             if (shader == null) return mesh;
 
@@ -436,7 +441,6 @@ namespace Cthangover.Live2D.Cubism.Framework
             if (texture != null)
                 mat.SetShaderParameter("tex_main", texture);
 
-            mi2d.Mesh = mesh;
             mi2d.Material = mat;
             return mesh;
         }
@@ -478,14 +482,17 @@ namespace Cthangover.Live2D.Cubism.Framework
 
                 mi.ZIndex = renderOrders[di];
 
-                var mc = multiplyColors[di];
-                mat.SetShaderParameter("color_multiply", new Color(mc.X, mc.Y, mc.Z, mc.W));
+                if (mat != null)
+                {
+                    var mc = multiplyColors[di];
+                    mat.SetShaderParameter("color_multiply", new Color(mc.X, mc.Y, mc.Z, mc.W));
 
-                var sc = screenColors[di];
-                mat.SetShaderParameter("color_screen", new Color(sc.X, sc.Y, sc.Z, sc.W));
+                    var sc = screenColors[di];
+                    mat.SetShaderParameter("color_screen", new Color(sc.X, sc.Y, sc.Z, sc.W));
 
-                if ((flags & CubismCoreBindings.OpacityDidChange) != 0)
-                    mat.SetShaderParameter("color_base", new Color(1f, 1f, 1f, opacities[di]));
+                    if ((flags & CubismCoreBindings.OpacityDidChange) != 0)
+                        mat.SetShaderParameter("color_base", new Color(1f, 1f, 1f, opacities[di]));
+                }
 
                 if ((flags & CubismCoreBindings.VertexPositionsDidChange) != 0)
                 {
@@ -493,21 +500,103 @@ namespace Cthangover.Live2D.Cubism.Framework
                 }
             }
 
+            UpdateMaskGroups(dynamicFlags, dc);
+
+            _model.ResetDynamicFlags();
+        }
+
+        /// <summary>
+        /// Per-frame mask refresh, mirroring CubismRenderer::DrawClip:
+        /// the clip bounding box is recomputed from the CURRENT vertex positions
+        /// of the mask drawables each frame. When the clip rect moves, the mask
+        /// meshes are re-offset into the SubViewport space and the masked
+        /// drawables' mesh_offset shader parameter is refreshed; when the rect
+        /// outgrows the render target, the SubViewport is resized (power of two,
+        /// so this stays rare). Without flag changes and offset movement the
+        /// per-drawable work is skipped.
+        /// </summary>
+        private unsafe void UpdateMaskGroups(byte* dynamicFlags, int dc)
+        {
+            if (_maskGroups.Count == 0) return;
+
+            var vertexCounts = _model.GetVertexCounts();
+            var vertexPositions = _model.GetVertexPositions();
+            var ppu = _model.PixelsPerUnit;
+
             for (int gi = 0; gi < _maskGroups.Count; gi++)
             {
                 var group = _maskGroups[gi];
-                if (group.MaskDrawableIndices == null) continue;
-                for (int mi = 0; mi < group.MaskDrawableIndices.Length; mi++)
+                var maskIndices = group.MaskDrawableIndices;
+                if (maskIndices == null || maskIndices.Length == 0) continue;
+
+                // Current bounds over the mask drawables (pixel space).
+                float minX = float.MaxValue, minY = float.MaxValue, maxX = float.MinValue, maxY = float.MinValue;
+                var any = false;
+                for (int mi = 0; mi < maskIndices.Length; mi++)
                 {
-                    var di = group.MaskDrawableIndices[mi];
+                    var di = maskIndices[mi];
                     if (di < 0 || di >= dc) continue;
-                    var mFlags = dynamicFlags[di];
-                    if ((mFlags & CubismCoreBindings.VertexPositionsDidChange) == 0) continue;
+                    var vCount = vertexCounts[di];
+                    var vp = vertexPositions[di];
+                    for (int v = 0; v < vCount; v++)
+                    {
+                        float x = vp[v].X * ppu;
+                        float y = -vp[v].Y * ppu;
+                        if (x < minX) minX = x;
+                        if (y < minY) minY = y;
+                        if (x > maxX) maxX = x;
+                        if (y > maxY) maxY = y;
+                        any = true;
+                    }
+                }
+                if (!any) continue;
+
+                const float pad = 4f;
+                float newOffsetX = minX - pad;
+                float newOffsetY = minY - pad;
+                float needed = Math.Max(maxX - minX + pad * 2f, maxY - minY + pad * 2f);
+                needed = Math.Max(needed, 64f);
+                int neededSize = NextPowerOfTwo((int)Mathf.Ceil(needed));
+
+                bool offsetChanged = newOffsetX != group.OffsetX || newOffsetY != group.OffsetY;
+                bool sizeChanged = neededSize != group.ViewportSize;
+                if (sizeChanged)
+                {
+                    group.ViewportSize = neededSize;
+                    group.Viewport.Size = new Vector2I(neededSize, neededSize);
+                }
+                if (offsetChanged)
+                {
+                    group.OffsetX = newOffsetX;
+                    group.OffsetY = newOffsetY;
+                }
+                _maskGroups[gi] = group;
+
+                // Rewrite mask mesh vertices when the mask drawable moved or the
+                // clip rect moved (offsets are baked into the vertex positions).
+                for (int mi = 0; mi < maskIndices.Length; mi++)
+                {
+                    var di = maskIndices[mi];
+                    if (di < 0 || di >= dc) continue;
+                    bool flagged = (dynamicFlags[di] & CubismCoreBindings.VertexPositionsDidChange) != 0;
+                    if (!flagged && !offsetChanged) continue;
                     UpdateMaskMeshVertices(di, group.MaskArrayMeshes[mi], gi);
                 }
-            }
 
-            _model.ResetDynamicFlags();
+                // Masked drawables sample the mask texture through mesh_offset;
+                // refresh it whenever the clip rect moved or was resized.
+                if (offsetChanged || sizeChanged)
+                {
+                    for (int di = 0; di < dc; di++)
+                    {
+                        if (_drawableMaskGroupIndex == null || di >= _drawableMaskGroupIndex.Length) break;
+                        if (_drawableMaskGroupIndex[di] != gi) continue;
+                        var mat = _materials[di];
+                        if (mat != null)
+                            mat.SetShaderParameter("mesh_offset", new Vector2(group.OffsetX, group.OffsetY));
+                    }
+                }
+            }
         }
 
         private unsafe void UpdateMeshVertices(int drawableIndex, ArrayMesh mesh)
@@ -594,7 +683,7 @@ namespace Cthangover.Live2D.Cubism.Framework
             _drawableMaskChannel = null;
 
             foreach (var group in _maskGroups)
-                group.Viewport.QueueFree();
+                group.Viewport?.QueueFree();
             _maskGroups.Clear();
         }
 
@@ -631,7 +720,9 @@ namespace Cthangover.Live2D.Cubism.Framework
         {
             try
             {
-                var shader = Cthangover.Core.Mods.ModManager.Instance?.ResolveShader(name);
+                // Canonical resource path: shader resolution goes through the mod
+                // resolver system (ShaderResolver via ModManager.GetResolver).
+                var shader = Cthangover.Core.Mods.ModManager.Instance?.GetResolver<ShaderResolver>()?.Resolve(name);
                 if (shader != null)
                 {
                     GameLogger.Log("LIVE2D", $"ResolveShader: '{name}' OK");

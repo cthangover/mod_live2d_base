@@ -1,4 +1,3 @@
-using System;
 using System.Collections.Generic;
 using System.Text.Json;
 
@@ -17,7 +16,7 @@ namespace Cthangover.Live2D.Cubism.Framework
     /// <summary>
     /// A single particle in a physics chain. Holds position, velocity, force accumulators,
     /// and per-particle properties (mobility, delay, acceleration, radius) from the
-    /// .physics3.json file. Positions are computed relative to the chain anchor.
+    /// .physics3.json file. Mirrors SDK CubismPhysicsParticle.
     /// </summary>
     public struct CubismPhysicsParticle
     {
@@ -61,8 +60,11 @@ namespace Cthangover.Live2D.Cubism.Framework
 
     /// <summary>
     /// Maps a physics chain output back to a model parameter.
-    /// Defines which particle vertex to read, the output type (X, Y, angle),
-    /// translation scale, weight, and reflection.
+    /// <see cref="VertexIndex"/> is the pendulum vertex index relative to the
+    /// owning sub-rig's base particle (SDK semantics). The translation scale is
+    /// deliberately never loaded: native CubismPhysicsJson reads only the
+    /// single "Scale" value into <see cref="AngleScale"/>, so X/Y-typed outputs
+    /// scale by zero exactly like the native implementation.
     /// </summary>
     public struct CubismPhysicsOutput
     {
@@ -95,146 +97,251 @@ namespace Cthangover.Live2D.Cubism.Framework
     }
 
     /// <summary>
-    /// JSON parser for the Cubism .physics3.json format.
-    /// Reads the Meta section (fps, gravity, wind) and the PhysicsSettings
-    /// array (sub-rigs with their inputs, outputs, and vertices/particles).
-    /// 
-    /// All data is accessed through typed out-parameter methods that
-    /// parse JSON elements directly — avoiding intermediate allocation
-    /// of temporary data structures.
+    /// JSON parser for the Cubism .physics3.json format. Field-by-field port of
+    /// Cubism SDK for Native 5-r.5 Physics/CubismPhysicsJson.cpp: every getter
+    /// reads the same key at the same JSON path. Missing numeric values yield
+    /// 0 / false like the native error-value accessors; in particular a
+    /// missing Meta.Fps yields 0 (the simulation then steps per display frame).
+    /// Note: native does not read InitialPosition/InitialVelocity for vertices —
+    /// those keys are ignored here as well; particles are laid out by
+    /// CubismPhysics.Initialize().
     /// </summary>
     public class CubismPhysicsJson
     {
         private readonly JsonDocument _json;
 
-        /// <summary>
-        /// Parses the given .physics3.json bytes.
-        /// </summary>
+        /// <summary>Parses the given .physics3.json bytes.</summary>
         public CubismPhysicsJson(byte[] jsonBytes)
         {
             _json = JsonDocument.Parse(jsonBytes);
         }
 
-        /// <summary>Physics simulation FPS from the Meta section, default 30.</summary>
-        public float GetFps()
-        {
-            var meta = _json.RootElement.GetProperty("Meta");
-            return meta.TryGetProperty("Fps", out var v) ? v.GetSingle() : 30f;
-        }
+        // ------------------------------------------------------------------
+        // Meta
+        // ------------------------------------------------------------------
 
-        /// <summary>Number of sub-rig entries in PhysicsSettings.</summary>
-        public int GetSubRigCount() =>
-            _json.RootElement.TryGetProperty("PhysicsSettings", out var arr) ? arr.GetArrayLength() : 0;
-
-        /// <summary>Reads gravity vector from Meta.EffectiveForces.Gravity. Defaults to (0, -1).</summary>
+        /// <summary>Gravity vector from Meta.EffectiveForces.Gravity (missing values read as 0).</summary>
         public void GetGravity(out float x, out float y)
         {
-            x = 0; y = -1;
-            var meta = _json.RootElement.GetProperty("Meta");
-            if (meta.TryGetProperty("EffectiveForces", out var ef) &&
-                ef.TryGetProperty("Gravity", out var g))
+            x = 0f;
+            y = 0f;
+            if (_json.RootElement.TryGetProperty("Meta", out var meta) &&
+                meta.TryGetProperty("EffectiveForces", out var effectiveForces) &&
+                effectiveForces.TryGetProperty("Gravity", out var gravity))
             {
-                x = g.TryGetProperty("X", out var gx) ? gx.GetSingle() : 0f;
-                y = g.TryGetProperty("Y", out var gy) ? gy.GetSingle() : -1f;
+                x = GetFloat(gravity, "X");
+                y = GetFloat(gravity, "Y");
             }
         }
 
-        /// <summary>Reads wind vector from Meta.EffectiveForces.Wind. Defaults to (0, 0).</summary>
+        /// <summary>Wind vector from Meta.EffectiveForces.Wind (missing values read as 0).</summary>
         public void GetWind(out float x, out float y)
         {
-            x = 0; y = 0;
-            var meta = _json.RootElement.GetProperty("Meta");
-            if (meta.TryGetProperty("EffectiveForces", out var ef) &&
-                ef.TryGetProperty("Wind", out var w))
+            x = 0f;
+            y = 0f;
+            if (_json.RootElement.TryGetProperty("Meta", out var meta) &&
+                meta.TryGetProperty("EffectiveForces", out var effectiveForces) &&
+                effectiveForces.TryGetProperty("Wind", out var wind))
             {
-                x = w.TryGetProperty("X", out var wx) ? wx.GetSingle() : 0f;
-                y = w.TryGetProperty("Y", out var wy) ? wy.GetSingle() : 0f;
+                x = GetFloat(wind, "X");
+                y = GetFloat(wind, "Y");
             }
         }
 
-        /// <summary>Number of input entries in the given sub-rig.</summary>
-        public int GetInputCount(int subRigIndex) =>
-            GetSubRig(subRigIndex).GetProperty("Input").GetArrayLength();
+        /// <summary>Simulation FPS from Meta.Fps; 0 when absent (native behavior).</summary>
+        public float GetFps()
+        {
+            return _json.RootElement.TryGetProperty("Meta", out var meta) ? GetFloat(meta, "Fps") : 0f;
+        }
 
-        /// <summary>Number of output entries in the given sub-rig.</summary>
-        public int GetOutputCount(int subRigIndex) =>
-            GetSubRig(subRigIndex).GetProperty("Output").GetArrayLength();
+        /// <summary>Sub-rig count from Meta.PhysicsSettingCount.</summary>
+        public int GetSubRigCount()
+        {
+            if (_json.RootElement.TryGetProperty("Meta", out var meta) &&
+                meta.TryGetProperty("PhysicsSettingCount", out var count))
+            {
+                return count.GetInt32();
+            }
 
-        /// <summary>Number of vertex/particle entries in the given sub-rig.</summary>
-        public int GetVertexCount(int subRigIndex) =>
-            GetSubRig(subRigIndex).GetProperty("Vertices").GetArrayLength();
+            // Defensive fallback: use the actual settings array length
+            // (native would return 0 when the key is absent).
+            return _json.RootElement.TryGetProperty("PhysicsSettings", out var settings)
+                ? settings.GetArrayLength()
+                : 0;
+        }
 
-        /// <summary>Reads position normalization (min, max, default) for the given sub-rig.</summary>
+        /// <summary>Total input count from Meta.TotalInputCount.</summary>
+        public int GetTotalInputCount() => GetMetaInt("TotalInputCount");
+
+        /// <summary>Total output count from Meta.TotalOutputCount.</summary>
+        public int GetTotalOutputCount() => GetMetaInt("TotalOutputCount");
+
+        /// <summary>Total vertex/particle count from Meta.VertexCount.</summary>
+        public int GetVertexCount() => GetMetaInt("VertexCount");
+
+        // ------------------------------------------------------------------
+        // Normalization
+        // ------------------------------------------------------------------
+
+        /// <summary>Position normalization (Minimum/Maximum/Default) for a sub-rig; missing values read as 0.</summary>
         public void GetNormalizationPosition(int subRigIndex, out CubismPhysicsNormalization norm)
         {
             norm = default;
-            var sr = GetSubRig(subRigIndex);
-            if (!sr.TryGetProperty("Normalization", out var n)) return;
-            if (!n.TryGetProperty("Position", out var pos)) return;
-            norm.Minimum = pos.TryGetProperty("Minimum", out var p) ? p.GetSingle() : -30f;
-            norm.Maximum = pos.TryGetProperty("Maximum", out var pp) ? pp.GetSingle() : 30f;
-            norm.Default = pos.TryGetProperty("Default", out var pd) ? pd.GetSingle() : 0f;
+            if (GetSubRig(subRigIndex).TryGetProperty("Normalization", out var n) &&
+                n.TryGetProperty("Position", out var pos))
+            {
+                norm.Minimum = GetFloat(pos, "Minimum");
+                norm.Maximum = GetFloat(pos, "Maximum");
+                norm.Default = GetFloat(pos, "Default");
+            }
         }
 
-        /// <summary>Reads angle normalization (min, max, default) for the given sub-rig.</summary>
+        /// <summary>Angle normalization (Minimum/Maximum/Default) for a sub-rig; missing values read as 0.</summary>
         public void GetNormalizationAngle(int subRigIndex, out CubismPhysicsNormalization norm)
         {
             norm = default;
-            var sr = GetSubRig(subRigIndex);
-            if (!sr.TryGetProperty("Normalization", out var n)) return;
-            if (!n.TryGetProperty("Angle", out var angle)) return;
-            norm.Minimum = angle.TryGetProperty("Minimum", out var p) ? p.GetSingle() : -30f;
-            norm.Maximum = angle.TryGetProperty("Maximum", out var pp) ? pp.GetSingle() : 30f;
-            norm.Default = angle.TryGetProperty("Default", out var pd) ? pd.GetSingle() : 0f;
+            if (GetSubRig(subRigIndex).TryGetProperty("Normalization", out var n) &&
+                n.TryGetProperty("Angle", out var angle))
+            {
+                norm.Minimum = GetFloat(angle, "Minimum");
+                norm.Maximum = GetFloat(angle, "Maximum");
+                norm.Default = GetFloat(angle, "Default");
+            }
         }
 
-        /// <summary>Reads a single input entry: parameter ID, weight, type, reflect flag.</summary>
-        public void GetInput(int subRigIndex, int inputIndex, out string parameterId, out float weight,
-            out CubismPhysicsSource type, out bool reflect)
+        // ------------------------------------------------------------------
+        // Input
+        // ------------------------------------------------------------------
+
+        /// <summary>Number of input entries in the given sub-rig.</summary>
+        public int GetInputCount(int subRigIndex) => GetEntriesLength(subRigIndex, "Input");
+
+        /// <summary>Input weight (Input[i].Weight).</summary>
+        public float GetInputWeight(int subRigIndex, int inputIndex) =>
+            GetFloat(GetInputEntry(subRigIndex, inputIndex), "Weight");
+
+        /// <summary>Input reflect flag (Input[i].Reflect).</summary>
+        public bool GetInputReflect(int subRigIndex, int inputIndex) =>
+            GetBool(GetInputEntry(subRigIndex, inputIndex), "Reflect");
+
+        /// <summary>Input type tag (Input[i].Type): "X", "Y" or "Angle".</summary>
+        public string GetInputType(int subRigIndex, int inputIndex) =>
+            GetString(GetInputEntry(subRigIndex, inputIndex), "Type");
+
+        /// <summary>Source parameter id (Input[i].Source.Id).</summary>
+        public string GetInputSourceId(int subRigIndex, int inputIndex)
         {
-            var inp = GetSubRig(subRigIndex).GetProperty("Input")[inputIndex];
-            parameterId = inp.GetProperty("Source").GetProperty("Id").GetString();
-            weight = inp.TryGetProperty("Weight", out var w) ? w.GetSingle() : 1f;
-            type = ParseSource(inp.TryGetProperty("Type", out var t) ? t.GetString() : "X");
-            reflect = inp.TryGetProperty("Reflect", out var r) && r.GetBoolean();
+            var entry = GetInputEntry(subRigIndex, inputIndex);
+            return entry.TryGetProperty("Source", out var source) ? GetString(source, "Id") : null;
         }
 
-        /// <summary>Reads a single output entry: destination parameter ID, vertex index, scales, type, reflect.</summary>
-        public void GetOutput(int subRigIndex, int outputIndex, out string parameterId, out int vertexIndex,
-            out float scaleX, out float scaleY, out float weight, out CubismPhysicsSource type, out bool reflect)
+        // ------------------------------------------------------------------
+        // Output
+        // ------------------------------------------------------------------
+
+        /// <summary>Number of output entries in the given sub-rig.</summary>
+        public int GetOutputCount(int subRigIndex) => GetEntriesLength(subRigIndex, "Output");
+
+        /// <summary>Pendulum vertex index (Output[i].VertexIndex), relative to the sub-rig base particle.</summary>
+        public int GetOutputVertexIndex(int subRigIndex, int outputIndex) =>
+            GetInt(GetOutputEntry(subRigIndex, outputIndex), "VertexIndex");
+
+        /// <summary>Angle scale (Output[i].Scale). Native maps the single "Scale" value to the angle scale only.</summary>
+        public float GetOutputAngleScale(int subRigIndex, int outputIndex) =>
+            GetFloat(GetOutputEntry(subRigIndex, outputIndex), "Scale");
+
+        /// <summary>Output weight (Output[i].Weight).</summary>
+        public float GetOutputWeight(int subRigIndex, int outputIndex) =>
+            GetFloat(GetOutputEntry(subRigIndex, outputIndex), "Weight");
+
+        /// <summary>Destination parameter id (Output[i].Destination.Id).</summary>
+        public string GetOutputsDestinationId(int subRigIndex, int outputIndex)
         {
-            var outp = GetSubRig(subRigIndex).GetProperty("Output")[outputIndex];
-            parameterId = outp.GetProperty("Destination").GetProperty("Id").GetString();
-            vertexIndex = outp.TryGetProperty("VertexIndex", out var v) ? v.GetInt32() : 0;
-            scaleX = scaleY = outp.TryGetProperty("Scale", out var s) ? s.GetSingle() : 1f;
-            weight = outp.TryGetProperty("Weight", out var w) ? w.GetSingle() : 1f;
-            type = ParseSource(outp.TryGetProperty("Type", out var t) ? t.GetString() : "X");
-            reflect = outp.TryGetProperty("Reflect", out var r) && r.GetBoolean();
+            var entry = GetOutputEntry(subRigIndex, outputIndex);
+            return entry.TryGetProperty("Destination", out var destination) ? GetString(destination, "Id") : null;
         }
 
-        /// <summary>Reads a single particle/vertex: mobility, delay, acceleration, radius, position.</summary>
-        public void GetParticle(int subRigIndex, int vertexIndex,
-            out float mobility, out float delay, out float acceleration, out float radius,
-            out float posX, out float posY)
+        /// <summary>Output type tag (Output[i].Type): "X", "Y" or "Angle".</summary>
+        public string GetOutputType(int subRigIndex, int outputIndex) =>
+            GetString(GetOutputEntry(subRigIndex, outputIndex), "Type");
+
+        /// <summary>Output reflect flag (Output[i].Reflect).</summary>
+        public bool GetOutputReflect(int subRigIndex, int outputIndex) =>
+            GetBool(GetOutputEntry(subRigIndex, outputIndex), "Reflect");
+
+        // ------------------------------------------------------------------
+        // Particle (Vertices)
+        // ------------------------------------------------------------------
+
+        /// <summary>Number of vertex/particle entries in the given sub-rig.</summary>
+        public int GetParticleCount(int subRigIndex) => GetEntriesLength(subRigIndex, "Vertices");
+
+        /// <summary>Particle mobility (Vertices[i].Mobility).</summary>
+        public float GetParticleMobility(int subRigIndex, int vertexIndex) =>
+            GetFloat(GetVertexEntry(subRigIndex, vertexIndex), "Mobility");
+
+        /// <summary>Particle delay (Vertices[i].Delay).</summary>
+        public float GetParticleDelay(int subRigIndex, int vertexIndex) =>
+            GetFloat(GetVertexEntry(subRigIndex, vertexIndex), "Delay");
+
+        /// <summary>Particle acceleration (Vertices[i].Acceleration).</summary>
+        public float GetParticleAcceleration(int subRigIndex, int vertexIndex) =>
+            GetFloat(GetVertexEntry(subRigIndex, vertexIndex), "Acceleration");
+
+        /// <summary>Particle radius (Vertices[i].Radius).</summary>
+        public float GetParticleRadius(int subRigIndex, int vertexIndex) =>
+            GetFloat(GetVertexEntry(subRigIndex, vertexIndex), "Radius");
+
+        /// <summary>Particle position (Vertices[i].Position.X/Y).</summary>
+        public void GetParticlePosition(int subRigIndex, int vertexIndex, out float x, out float y)
         {
-            var verts = GetSubRig(subRigIndex).GetProperty("Vertices")[vertexIndex];
-            mobility = verts.TryGetProperty("Mobility", out var m) ? m.GetSingle() : 1f;
-            delay = verts.TryGetProperty("Delay", out var d) ? d.GetSingle() : 0f;
-            acceleration = verts.TryGetProperty("Acceleration", out var a) ? a.GetSingle() : 1f;
-            radius = verts.TryGetProperty("Radius", out var r) ? r.GetSingle() : 1f;
-            var pos = verts.GetProperty("Position");
-            posX = pos.TryGetProperty("X", out var px) ? px.GetSingle() : 0f;
-            posY = pos.TryGetProperty("Y", out var py) ? py.GetSingle() : 0f;
+            var entry = GetVertexEntry(subRigIndex, vertexIndex);
+            x = 0f;
+            y = 0f;
+            if (entry.TryGetProperty("Position", out var position))
+            {
+                x = GetFloat(position, "X");
+                y = GetFloat(position, "Y");
+            }
         }
+
+        // ------------------------------------------------------------------
+        // Helpers
+        // ------------------------------------------------------------------
 
         private JsonElement GetSubRig(int index) =>
             _json.RootElement.GetProperty("PhysicsSettings")[index];
 
-        private static CubismPhysicsSource ParseSource(string v) => v switch
+        private JsonElement GetInputEntry(int subRigIndex, int inputIndex) =>
+            GetSubRig(subRigIndex).GetProperty("Input")[inputIndex];
+
+        private JsonElement GetOutputEntry(int subRigIndex, int outputIndex) =>
+            GetSubRig(subRigIndex).GetProperty("Output")[outputIndex];
+
+        private JsonElement GetVertexEntry(int subRigIndex, int vertexIndex) =>
+            GetSubRig(subRigIndex).GetProperty("Vertices")[vertexIndex];
+
+        private int GetEntriesLength(int subRigIndex, string name)
         {
-            "Angle" => CubismPhysicsSource.Angle,
-            "Y" => CubismPhysicsSource.Y,
-            _ => CubismPhysicsSource.X
-        };
+            var subRig = GetSubRig(subRigIndex);
+            return subRig.TryGetProperty(name, out var entries) ? entries.GetArrayLength() : 0;
+        }
+
+        private int GetMetaInt(string name) =>
+            _json.RootElement.TryGetProperty("Meta", out var meta) ? GetInt(meta, name) : 0;
+
+        private static float GetFloat(JsonElement element, string name) =>
+            element.TryGetProperty(name, out var value) ? value.GetSingle() : 0f;
+
+        private static int GetInt(JsonElement element, string name) =>
+            element.TryGetProperty(name, out var value) ? value.GetInt32() : 0;
+
+        private static bool GetBool(JsonElement element, string name) =>
+            element.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.True;
+
+        private static string GetString(JsonElement element, string name) =>
+            element.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String
+                ? value.GetString()
+                : string.Empty;
     }
 }

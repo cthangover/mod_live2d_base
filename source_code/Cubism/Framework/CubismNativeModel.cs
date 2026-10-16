@@ -29,6 +29,34 @@ namespace Cthangover.Live2D.Cubism.Framework
         private GCHandle _mocAlignedHandle;
         private GCHandle _modelAlignedHandle;
 
+        // The Core stores the raw function pointer, so the delegate must live
+        // for the whole process — a collected delegate would crash native code.
+        private static readonly CubismCoreBindings.CsmLogDelegate NativeLogDelegate = OnNativeLog;
+        private static bool _nativeLogWired;
+
+        static CubismNativeModel()
+        {
+            WireNativeLog();
+        }
+
+        /// <summary>
+        /// Routes native Core log output (the only channel for native-side errors:
+        /// invalid moc3, unsupported version, alignment failures) into GameLogger.
+        /// </summary>
+        private static void WireNativeLog()
+        {
+            if (_nativeLogWired) return;
+            _nativeLogWired = true;
+            CubismCoreBindings.csmSetLogFunction(NativeLogDelegate);
+        }
+
+        private static void OnNativeLog(IntPtr messagePtr)
+        {
+            if (messagePtr == IntPtr.Zero) return;
+            string message = Marshal.PtrToStringAnsi(messagePtr) ?? string.Empty;
+            GameLogger.Log("LIVE2D-CORE", message);
+        }
+
         private int _drawableCount;
         private int _parameterCount;
 
@@ -67,38 +95,95 @@ namespace Cthangover.Live2D.Cubism.Framework
         /// </summary>
         public unsafe void LoadMoc(byte[] mocBytes)
         {
+            if (IsLoaded)
+            {
+                // Guard against a silent native-memory leak: handles are pinned and the
+                // previous moc/model are never freed, so a second LoadMoc on the same
+                // instance is always a bug in the caller.
+                throw new InvalidOperationException(
+                    "LoadMoc: a moc is already loaded in this CubismNativeModel instance. " +
+                    "Create a new instance to load another model.");
+            }
+
             int alignedMocSize = (mocBytes.Length + CubismCoreBindings.AlignofMoc - 1)
                 / CubismCoreBindings.AlignofMoc * CubismCoreBindings.AlignofMoc;
             byte[] mocBuffer = new byte[alignedMocSize + CubismCoreBindings.AlignofMoc];
             _mocAlignedHandle = GCHandle.Alloc(mocBuffer, GCHandleType.Pinned);
-            IntPtr mocPtr = _mocAlignedHandle.AddrOfPinnedObject();
-            long alignedAddr = (mocPtr.ToInt64() + CubismCoreBindings.AlignofMoc - 1)
-                / CubismCoreBindings.AlignofMoc * CubismCoreBindings.AlignofMoc;
-            var alignedMocPtr = new IntPtr(alignedAddr);
-            Marshal.Copy(mocBytes, 0, alignedMocPtr, mocBytes.Length);
-
-            IntPtr moc = CubismCoreBindings.csmReviveMocInPlace(
-                (void*)alignedMocPtr, (uint)mocBytes.Length);
-            if (moc == IntPtr.Zero)
+            try
             {
-                GameLogger.Log("LIVE2D", "LoadMoc: csmReviveMocInPlace failed — .moc3 data is invalid or corrupted", LogLevel.Error);
-                throw new InvalidOperationException("csmReviveMocInPlace failed");
+                IntPtr mocPtr = _mocAlignedHandle.AddrOfPinnedObject();
+                long alignedAddr = (mocPtr.ToInt64() + CubismCoreBindings.AlignofMoc - 1)
+                    / CubismCoreBindings.AlignofMoc * CubismCoreBindings.AlignofMoc;
+                var alignedMocPtr = new IntPtr(alignedAddr);
+                Marshal.Copy(mocBytes, 0, alignedMocPtr, mocBytes.Length);
+
+            // csmReviveMocInPlace (verified by disassembly of the shipped DLL) hard-requires
+            // size % 64 == 0 and returns failure with '"size" is invalid.' otherwise. Cubism
+            // Editor always exports moc3 files whose length is a multiple of 64, but we do not
+            // rely on that: the buffer is already zero-initialized and 64-byte padded, so we
+            // pass the padded size — the Core reads only the real content, zero padding is safe.
+                uint mocBufferSize = (uint)alignedMocSize;
+
+            // Validate the moc3 buffer against the loaded Core before reviving it.
+            // Both checks use Core functions that were previously declared but never
+            // called — this gives diagnosable errors instead of a bare
+            // "csmReviveMocInPlace failed" for wrong-version or corrupted files.
+                uint mocVersion = CubismCoreBindings.csmGetMocVersion((void*)alignedMocPtr, mocBufferSize);
+                uint coreVersion = CubismCoreBindings.csmGetLatestMocVersion();
+                if (mocVersion == 0)
+                {
+                    GameLogger.Log("LIVE2D", "LoadMoc: buffer is not a recognized .moc3 file (csmGetMocVersion returned 0)", LogLevel.Error);
+                    throw new InvalidOperationException("The .moc3 buffer is not a recognized moc3 file");
+                }
+                if (mocVersion > coreVersion)
+                {
+                    GameLogger.Log("LIVE2D",
+                        $"LoadMoc: .moc3 version {mocVersion} is newer than Cubism Core {coreVersion} — ship a newer Live2DCubismCore.dll",
+                        LogLevel.Error);
+                    throw new InvalidOperationException(
+                        $".moc3 version {mocVersion} is not supported by Cubism Core {coreVersion}");
+                }
+
+                if (CubismCoreBindings.csmHasMocConsistency((void*)alignedMocPtr, mocBufferSize) != 1)
+                {
+                    GameLogger.Log("LIVE2D", "LoadMoc: .moc3 failed the consistency check (csmHasMocConsistency != 1) — data is corrupted", LogLevel.Error);
+                    throw new InvalidOperationException(".moc3 data is inconsistent (csmHasMocConsistency failed)");
+                }
+
+                IntPtr moc = CubismCoreBindings.csmReviveMocInPlace(
+                    (void*)alignedMocPtr, mocBufferSize);
+                if (moc == IntPtr.Zero)
+                {
+                    GameLogger.Log("LIVE2D", "LoadMoc: csmReviveMocInPlace failed — .moc3 data is invalid or corrupted", LogLevel.Error);
+                    throw new InvalidOperationException("csmReviveMocInPlace failed");
+                }
+
+                uint modelSize = CubismCoreBindings.csmGetSizeofModel(moc);
+                byte[] modelBuffer = new byte[modelSize + CubismCoreBindings.AlignofModel];
+                _modelAlignedHandle = GCHandle.Alloc(modelBuffer, GCHandleType.Pinned);
+                IntPtr modelPtr = _modelAlignedHandle.AddrOfPinnedObject();
+                long modelAlignedAddr = (modelPtr.ToInt64() + CubismCoreBindings.AlignofModel - 1)
+                    / CubismCoreBindings.AlignofModel * CubismCoreBindings.AlignofModel;
+                var alignedModelPtr = new IntPtr(modelAlignedAddr);
+
+                _model = CubismCoreBindings.csmInitializeModelInPlace(
+                    moc, (void*)alignedModelPtr, modelSize);
+                if (_model == IntPtr.Zero)
+                {
+                    GameLogger.Log("LIVE2D", "LoadMoc: csmInitializeModelInPlace failed — model memory allocation failed", LogLevel.Error);
+                    throw new InvalidOperationException("csmInitializeModelInPlace failed");
+                }
             }
-
-            uint modelSize = CubismCoreBindings.csmGetSizeofModel(moc);
-            byte[] modelBuffer = new byte[modelSize + CubismCoreBindings.AlignofModel];
-            _modelAlignedHandle = GCHandle.Alloc(modelBuffer, GCHandleType.Pinned);
-            IntPtr modelPtr = _modelAlignedHandle.AddrOfPinnedObject();
-            long modelAlignedAddr = (modelPtr.ToInt64() + CubismCoreBindings.AlignofModel - 1)
-                / CubismCoreBindings.AlignofModel * CubismCoreBindings.AlignofModel;
-            var alignedModelPtr = new IntPtr(modelAlignedAddr);
-
-            _model = CubismCoreBindings.csmInitializeModelInPlace(
-                moc, (void*)alignedModelPtr, modelSize);
-            if (_model == IntPtr.Zero)
+            catch
             {
-                GameLogger.Log("LIVE2D", "LoadMoc: csmInitializeModelInPlace failed — model memory allocation failed", LogLevel.Error);
-                throw new InvalidOperationException("csmInitializeModelInPlace failed");
+                // Any failure after the Alloc calls must release the pinned buffers —
+                // otherwise the GCHandles (and the native memory they pin) leak for the
+                // rest of the process, because LoadMoc throws before Dispose is reachable.
+                if (_mocAlignedHandle.IsAllocated) _mocAlignedHandle.Free();
+                if (_modelAlignedHandle.IsAllocated) _modelAlignedHandle.Free();
+                _mocAlignedHandle = default;
+                _modelAlignedHandle = default;
+                throw;
             }
 
             var sizeInPixels = default(CubismCoreBindings.csmVector2);
@@ -318,6 +403,39 @@ namespace Cthangover.Live2D.Cubism.Framework
         /// <summary>Returns a pointer array of part ID strings.</summary>
         public unsafe IntPtr GetPartIds() =>
             CubismCoreBindings.csmGetPartIds(_model);
+
+        // Snapshot of the parameter values for the Load/Save bracket
+        // (port of CubismModel.cpp:878-910).
+        private float[] _savedParameterValues;
+
+        /// <summary>
+        /// Порт CubismModel::SaveParameters: сохраняет текущие значения параметров в снимок.
+        /// Вызывается сразу после фазы моушена, чтобы аддитивные слои (выражения, дыхание,
+        /// look-инъекция) каждый кадр стартовали от одного и того же базового состояния
+        /// и не накапливались кадр-за-кадром.
+        /// </summary>
+        public unsafe void SaveParameters()
+        {
+            if (_model == IntPtr.Zero) return;
+            var values = GetParameterValues();
+            if (_savedParameterValues == null || _savedParameterValues.Length != _parameterCount)
+                _savedParameterValues = new float[_parameterCount];
+            for (int i = 0; i < _parameterCount; i++)
+                _savedParameterValues[i] = values[i];
+        }
+
+        /// <summary>
+        /// Порт CubismModel::LoadParameters: восстанавливает значения параметров из снимка.
+        /// До первого SaveParameters ничего не делает (как в SDK).
+        /// </summary>
+        public unsafe void LoadParameters()
+        {
+            if (_model == IntPtr.Zero || _savedParameterValues == null) return;
+            var values = GetParameterValues();
+            var count = System.Math.Min(_parameterCount, _savedParameterValues.Length);
+            for (int i = 0; i < count; i++)
+                values[i] = _savedParameterValues[i];
+        }
 
         /// <summary>
         /// Frees pinned memory handles. The native model handle is set to zero;

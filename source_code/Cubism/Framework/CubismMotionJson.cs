@@ -9,7 +9,7 @@ namespace Cthangover.Live2D.Cubism.Framework
     /// curve statistics, beziers-restricted flag) and the Curves/UserData sections.
     /// 
     /// Parsed curve segments are returned as flat float arrays (interleaved
-    /// segment-type markers and point data), decoded by <see cref="CubismMotion.ParseSegments"/>.
+    /// segment-type markers and point data), decoded by CubismMotion.ParseSegmentsInternal.
     /// </summary>
     public class CubismMotionJson
     {
@@ -40,7 +40,7 @@ namespace Cthangover.Live2D.Cubism.Framework
 
             _duration = _meta.GetProperty("Duration").GetSingle();
             _isLoop = _meta.TryGetProperty("Loop", out var loop) && loop.GetBoolean();
-            _fps = _meta.TryGetProperty("Fps", out var fpsEl) ? fpsEl.GetSingle() : 30f;
+            _fps = _meta.TryGetProperty("Fps", out var fpsEl) && fpsEl.ValueKind == JsonValueKind.Number ? fpsEl.GetSingle() : 30f;
             _curveCount = _meta.TryGetProperty("CurveCount", out var ccEl) ? ccEl.GetInt32() : 0;
             _totalSegmentCount = _meta.TryGetProperty("TotalSegmentCount", out var tscEl) ? tscEl.GetInt32() : 0;
             _totalPointCount = _meta.TryGetProperty("TotalPointCount", out var tpcEl) ? tpcEl.GetInt32() : 0;
@@ -75,13 +75,13 @@ namespace Cthangover.Live2D.Cubism.Framework
         /// Motion-level fade-in time in seconds, or -1 if not specified.
         /// </summary>
         public float GetFadeInTime() =>
-            _meta.TryGetProperty("FadeInTime", out var v) ? v.GetSingle() : -1f;
+            _meta.TryGetProperty("FadeInTime", out var v) && v.ValueKind == JsonValueKind.Number ? v.GetSingle() : -1f;
 
         /// <summary>
         /// Motion-level fade-out time in seconds, or -1 if not specified.
         /// </summary>
         public float GetFadeOutTime() =>
-            _meta.TryGetProperty("FadeOutTime", out var v) ? v.GetSingle() : -1f;
+            _meta.TryGetProperty("FadeOutTime", out var v) && v.ValueKind == JsonValueKind.Number ? v.GetSingle() : -1f;
 
         /// <summary>
         /// Returns the target string for the curve at the given index
@@ -100,18 +100,20 @@ namespace Cthangover.Live2D.Cubism.Framework
         /// Per-curve fade-in time in seconds, or -1 if not specified.
         /// </summary>
         public float GetCurveFadeInTime(int index) =>
-            _curves[index].TryGetProperty("FadeInTime", out var v) ? v.GetSingle() : -1f;
+            _curves[index].TryGetProperty("FadeInTime", out var v) && v.ValueKind == JsonValueKind.Number ? v.GetSingle() : -1f;
 
         /// <summary>
         /// Per-curve fade-out time in seconds, or -1 if not specified.
         /// </summary>
         public float GetCurveFadeOutTime(int index) =>
-            _curves[index].TryGetProperty("FadeOutTime", out var v) ? v.GetSingle() : -1f;
+            _curves[index].TryGetProperty("FadeOutTime", out var v) && v.ValueKind == JsonValueKind.Number ? v.GetSingle() : -1f;
 
         /// <summary>
         /// Reads the raw float array of segment data for a curve.
-        /// The first element is the segment type marker (cast to int),
-        /// followed by point data depending on the segment type.
+        /// Формат Segments из motion3.json: [t0, v0, type, t, v, ...] — первые ДВА
+        /// элемента это стартовая точка кривой (время, значение), далее для каждого
+        /// сегмента маркер типа и его точки (Linear/Stepped/InverseStepped — 1 точка,
+        /// Bezier — 3). Разбор: <see cref="CubismMotion.ParseSegmentsInternal"/>.
         /// </summary>
         public void GetCurveSegments(int index, out float[] segments)
         {

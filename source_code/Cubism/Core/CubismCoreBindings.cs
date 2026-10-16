@@ -71,6 +71,19 @@ namespace Cthangover.Live2D.Cubism.Core
         [DllImport(DllName, CallingConvention = CallingConvention.StdCall)]
         public static extern unsafe IntPtr csmReviveMocInPlace(void* address, uint size);
 
+        /// <summary>Native log callback: receives a pointer to a NUL-terminated csmChar* message.</summary>
+        [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+        public delegate void CsmLogDelegate(IntPtr messagePtr);
+
+        /// <summary>
+        /// Installs the Core log handler. Without it every native-side failure
+        /// (invalid moc3, unsupported version, alignment errors) is invisible.
+        /// Keep the delegate in a static field for the process lifetime — the
+        /// Core stores the raw function pointer.
+        /// </summary>
+        [DllImport(DllName, CallingConvention = CallingConvention.StdCall)]
+        public static extern void csmSetLogFunction(CsmLogDelegate logFunction);
+
         /// <summary>Queries the memory size needed to initialize a model from the given moc.</summary>
         [DllImport(DllName, CallingConvention = CallingConvention.StdCall)]
         public static extern unsafe uint csmGetSizeofModel(IntPtr moc);

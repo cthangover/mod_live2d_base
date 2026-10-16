@@ -1,32 +1,53 @@
+using System;
+using System.Collections.Generic;
+
 namespace Cthangover.Live2D.Cubism.Framework
 {
     /// <summary>
     /// Represents one enqueued motion in the playback queue.
     /// Holds timing data (start time, end time, fade-in start time),
-    /// lifecycle flags (available, finished, auto-delete), and a
+    /// lifecycle flags (available, started, finished, auto-delete), and a
     /// reference to the motion itself.
-    /// 
+    ///
     /// Created by <see cref="CubismMotionQueueManager.StartMotion"/>
     /// and consumed frame-by-frame in <see cref="CubismMotionQueueManager.DoUpdateMotion"/>.
     /// </summary>
     public class CubismMotionQueueEntry
     {
-        /// <summary>Absolute user time when motion playback begins.</summary>
-        public float StartTime;
+        /// <summary>Absolute user time when motion playback begins. -1 until the first update.</summary>
+        public float StartTime = -1f;
 
         /// <summary>
         /// Absolute user time when playback ends. -1 for infinite (looping) motions.
         /// </summary>
-        public float EndTime;
+        public float EndTime = -1f;
 
         /// <summary>Absolute user time when fade-in begins (may differ from StartTime for offset motions).</summary>
         public float FadeInStartTime;
 
         /// <summary>Whether this entry should be processed during updates.</summary>
-        public bool IsAvailable;
+        public bool IsAvailable = true;
 
         /// <summary>Flag set when playback completes. Checked by the queue manager during cleanup.</summary>
         public bool IsFinished;
+
+        /// <summary>Flag set on the first update — порт CubismMotionQueueEntry::_started.</summary>
+        public bool IsStarted;
+
+        /// <summary>Время последнего кадра (состояние), порт CubismMotionQueueEntry::SetState.</summary>
+        public float StateTime;
+
+        /// <summary>Вес последнего кадра (состояние), порт CubismMotionQueueEntry::SetState.</summary>
+        public float StateWeight;
+
+        /// <summary>Абсолютное время последней проверки событий UserData (сдвигается каждый кадр).</summary>
+        public float LastCheckEventTime;
+
+        /// <summary>Длительность фейда-аута, назначенного при вытеснении новым моушеном.</summary>
+        public float FadeOutSeconds;
+
+        /// <summary>Флаг вытеснения: фейд-аут начат, EndTime будет назначен при следующем обновлении.</summary>
+        public bool IsTriggeredFadeOut;
 
         /// <summary>The motion instance driving parameter updates.</summary>
         public ACubismMotion Motion;
@@ -45,28 +66,69 @@ namespace Cthangover.Live2D.Cubism.Framework
         {
             Motion = motion;
             AutoDelete = autoDelete;
-            IsAvailable = true;
+        }
+
+        /// <summary>
+        /// Порт CubismMotionQueueEntry::SetFadeout: помечает запись для фейда-аута
+        /// (вызывается очередью, когда стартует новый моушен).
+        /// </summary>
+        public void SetFadeout(float fadeOutSeconds)
+        {
+            FadeOutSeconds = fadeOutSeconds;
+            IsTriggeredFadeOut = true;
+        }
+
+        /// <summary>
+        /// Порт CubismMotionQueueEntry::StartFadeout: назначает EndTime, сокращая его,
+        /// если фейд-аут уже был запущен раньше и раньше должен закончиться.
+        /// </summary>
+        public void StartFadeout(float fadeOutSeconds, float userTimeSeconds)
+        {
+            float newEndTimeSeconds = userTimeSeconds + fadeOutSeconds;
+            IsTriggeredFadeOut = true;
+
+            if (EndTime < 0f || newEndTimeSeconds < EndTime)
+            {
+                EndTime = newEndTimeSeconds;
+            }
+        }
+
+        /// <summary>Порт CubismMotionQueueEntry::SetState — сохраняет время и вес последнего кадра.</summary>
+        public void SetState(float timeSeconds, float weight)
+        {
+            StateTime = timeSeconds;
+            StateWeight = weight;
         }
     }
 
     /// <summary>
     /// Manages a queue of <see cref="ACubismMotion"/> instances for a single model.
-    /// Supports priority reservation (higher-priority motions preempt lower ones),
-    /// concurrent playback of multiple motions, and automatic cleanup of finished entries.
-    /// 
-    /// Two instances are used by <see cref="CubismModelNode"/>:
-    /// one for character motions (animations) and one for expressions.
-    /// Each is updated independently in the per-frame loop, allowing motions
-    /// and expressions to blend independently with their own fade weights.
-    /// 
-    /// The update loop iterates entries in reverse for safe removal during
-    /// traversal. Finished auto-delete entries are removed immediately;
-    /// non-auto-delete entries remain in the queue with their IsFinished flag set.
+    /// Поддержка вытеснения по приоритету (ReserveMotion), параллельного проигрывания
+    /// и автосборки завершённых записей. Порт CubismMotionQueueManager из SDK 5-r.5:
+    ///
+    /// - StartMotion назначает всем прежним записям фейд-аут;
+    /// - каждый кадр DoUpdateMotion вызывает <see cref="ACubismMotion.UpdateParameters"/>,
+    ///   затем проверяет события UserData (<see cref="ACubismMotion.GetFiredEvent"/>) и
+    ///   удаляет finished-записи;
+    /// - колбэком завершения владеет сам моушен: очередь его НЕ дублирует.
     /// </summary>
     public class CubismMotionQueueManager
     {
-        private readonly System.Collections.Generic.List<CubismMotionQueueEntry> _entries = new();
+        private readonly List<CubismMotionQueueEntry> _entries = new();
+        private readonly List<string> _firedEventValues = new();
         private int _reservedPriority = -1;
+
+        /// <summary>
+        /// Событие, вызываемое для каждого сработавшего UserData-события за кадр
+        /// (порт _eventCallback из CubismMotionQueueManager).
+        /// </summary>
+        public event Action<ACubismMotion, string> EventFired;
+
+        /// <summary>
+        /// События, собранные за последний кадр DoUpdateMotion по всем записям очереди.
+        /// Список очищается в начале каждого обновления — читайте его сразу после вызова.
+        /// </summary>
+        public IReadOnlyList<string> FiredEventValues => _firedEventValues;
 
         /// <summary>
         /// Sets the reserved priority threshold.
@@ -89,21 +151,27 @@ namespace Cthangover.Live2D.Cubism.Framework
         }
 
         /// <summary>
-        /// Creates and enqueues a motion for playback.
-        /// Instantiates a <see cref="CubismMotionQueueEntry"/>, calls
-        /// <see cref="ACubismMotion.SetupMotionQueueEntry"/> on it, and
-        /// adds it to the queue. Returns the entry for optional tracking.
+        /// Enqueues a motion for playback. Прежним записям назначается фейд-аут
+        /// (SetFadeout), после чего они плавно завершаются; сама запись инициализируется
+        /// при первом кадре <see cref="ACubismMotion.UpdateParameters"/>.
+        /// Параметр userTimeSeconds оставлен для совместимости вызовов.
         /// </summary>
         /// <param name="motion">The motion to play.</param>
         /// <param name="autoDelete">Whether to auto-remove on finish.</param>
-        /// <param name="userTimeSeconds">Current user time for start time calculation.</param>
+        /// <param name="userTimeSeconds">Current user time (не используется, порт сигнатуры).</param>
         public CubismMotionQueueEntry StartMotion(ACubismMotion motion, bool autoDelete, float userTimeSeconds)
         {
             if (motion == null)
                 return null;
 
+            // Порт CubismMotionQueueManager::StartMotion: прежние моушены вытесняются фейд-аутом.
+            foreach (var existing in _entries)
+            {
+                if (existing == null) continue;
+                existing.SetFadeout(existing.Motion?.FadeOutSeconds ?? 0f);
+            }
+
             var entry = new CubismMotionQueueEntry(motion, autoDelete);
-            motion.SetupMotionQueueEntry(entry, userTimeSeconds);
             _entries.Add(entry);
             return entry;
         }
@@ -123,40 +191,68 @@ namespace Cthangover.Live2D.Cubism.Framework
         public bool IsFinished()
         {
             foreach (var entry in _entries)
-                if (!entry.IsFinished)
+                if (entry != null && !entry.IsFinished)
                     return false;
             return true;
         }
 
         /// <summary>
-        /// Per-frame update for all queued motions.
-        /// Iterates in reverse for safe removal. For each active entry:
-        /// computes fade weight, invokes <see cref="ACubismMotion.DoUpdateParameters"/>,
-        /// and checks for completion. Finished auto-delete entries are removed.
+        /// Per-frame update — порт CubismMotionQueueManager::DoUpdateMotion.
+        /// Для каждой записи: UpdateParameters (фейд + применение значений + финализация
+        /// IsFinished самим моушеном), сборUserData-событий за кадр, затем удаление
+        /// finished-записей и старт отложенного фейда-аута вытесненных.
+        /// Обход прямой, как в SDK: моушены применяются от старых к новым.
         /// </summary>
         public void DoUpdateMotion(CubismNativeModel model, float userTimeSeconds)
         {
-            for (int i = _entries.Count - 1; i >= 0; i--)
+            _firedEventValues.Clear();
+
+            int i = 0;
+            while (i < _entries.Count)
             {
-                var entry = _entries[i];
-                if (!entry.IsAvailable || entry.IsFinished)
+                CubismMotionQueueEntry entry = _entries[i];
+
+                if (entry == null)
                 {
-                    if (entry.AutoDelete)
-                        _entries.RemoveAt(i);
+                    _entries.RemoveAt(i);
                     continue;
                 }
 
-                var weight = entry.Motion.UpdateFadeWeight(entry, userTimeSeconds);
-                entry.Motion.DoUpdateParameters(model, userTimeSeconds, weight, entry);
-
-                if (entry.Motion.GetDuration() > 0f)
+                ACubismMotion motion = entry.Motion;
+                if (motion == null)
                 {
-                    if (userTimeSeconds >= entry.EndTime && !entry.Motion.IsLoop)
-                    {
-                        entry.IsFinished = true;
-                        entry.Motion.OnFinishedMotion?.Invoke(entry.Motion);
-                    }
+                    _entries.RemoveAt(i);
+                    continue;
                 }
+
+                // ------ Применение значений (финализация — внутри моушена/обёртки) ------
+                motion.UpdateParameters(model, entry, userTimeSeconds);
+
+                // ------ Проверка UserData-событий за кадр ------
+                var fired = motion.GetFiredEvent(
+                    entry.LastCheckEventTime - entry.StartTime,
+                    userTimeSeconds - entry.StartTime);
+
+                for (int e = 0; e < fired.Count; e++)
+                    EventFired?.Invoke(motion, fired[e]);
+
+                _firedEventValues.AddRange(fired);
+                entry.LastCheckEventTime = userTimeSeconds;
+
+                // ------ Удаление завершённых записей ------
+                if (entry.IsFinished)
+                {
+                    _entries.RemoveAt(i);
+                    continue;
+                }
+
+                // Фейд-аут, запланированный при вытеснении, стартует после обновления.
+                if (entry.IsTriggeredFadeOut)
+                {
+                    entry.StartFadeout(entry.FadeOutSeconds, userTimeSeconds);
+                }
+
+                i++;
             }
         }
     }

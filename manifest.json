@@ -5,6 +5,9 @@
     "author": "ct",
     "description": "Live2D Cubism C# runtime: model loading, rendering, physics, animation, effects",
     "category": "library, visual",
-    "depends": ["visual_novel_core>=1", "interface>=1"],
-    "depends_native": ["native/*.dll", "native/*.so"]
+    "depends": ["interface>=1"],
+    "depends_native": ["native/*.dll", "native/*.so"],
+  "test_suites": [
+    {"id": "avatar", "activate": ["--itest=live2d_avatar"]}
+  ]
 }

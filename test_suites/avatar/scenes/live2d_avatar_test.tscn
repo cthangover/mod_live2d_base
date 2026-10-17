@@ -1,0 +1,6 @@
+[gd_scene format=3]
+
+[ext_resource type="Script" path="src/Live2DAvatarTestDriver.cs" id="1_driver"]
+
+[node name="Live2DAvatarTestDriver" type="Node2D"]
+script = ExtResource("1_driver")

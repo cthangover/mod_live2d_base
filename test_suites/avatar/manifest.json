@@ -1,0 +1,23 @@
+{
+  "name": "Live2D Test",
+  "description": "Test and demo mod for the live2d runtime: the sample Ren model (expressions, motions) shown by the home_outside overlay scene plus an avatar test driver. Requires live2d>=1.",
+  "sources": [
+    "src/*.cs"
+  ],
+  "ui": [
+    {
+      "id": "live2d_overlay",
+      "kind": "overlay",
+      "scene": "home_outside",
+      "slot": "ModBeforeUIPanel",
+      "scene_path": "scenes/live2d_overlay.tscn",
+      "once": false,
+      "show_on_start": true,
+      "priority": 10
+    }
+  ],
+  "depends": [
+    "visual_novel_core>=1",
+    "interface>=1"
+  ]
+}

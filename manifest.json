@@ -1,11 +1,11 @@
 {
-    "id": "live2d",
+    "id": "live2d_base",
     "name": "Live2D Cubism",
     "version": "1.0.0",
     "author": "ct",
     "description": "Live2D Cubism C# runtime: model loading, rendering, physics, animation, effects",
     "category": "library, visual",
-    "depends": ["interface>=1"],
+    "depends": ["ui_base>=1"],
     "depends_native": ["native/*.dll", "native/*.so"],
   "test_suites": [
     {"id": "avatar", "activate": ["--itest=live2d_avatar"]}

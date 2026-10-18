@@ -28,7 +28,7 @@ namespace Mods.Live2DTest
     /// </summary>
     public partial class Live2DAvatarTestDriver : Node2D
     {
-        private const string ModId = "live2d__avatar";
+        private const string ModId = "live2d_base__avatar";
         private const string ModelPath = "models/runtime/ren.model3.json";
         private const string LeftArmParam = "ParamArmL01";
         private const string RightArmParam = "ParamArmR01";

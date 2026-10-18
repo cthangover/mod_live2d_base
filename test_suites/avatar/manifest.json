@@ -1,6 +1,6 @@
 {
   "name": "Live2D Test",
-  "description": "Test and demo mod for the live2d runtime: the sample Ren model (expressions, motions) shown by the home_outside overlay scene plus an avatar test driver. Requires live2d>=1.",
+  "description": "Test and demo mod for the live2d runtime: the sample Ren model (expressions, motions) shown by the home_outside overlay scene plus an avatar test driver. Requires live2d_base>=1.",
   "sources": [
     "src/*.cs"
   ],
@@ -17,7 +17,7 @@
     }
   ],
   "depends": [
-    "visual_novel_core>=1",
-    "interface>=1"
+    "cthangover_story>=1",
+    "ui_base>=1"
   ]
 }

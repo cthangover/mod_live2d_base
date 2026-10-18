@@ -40,7 +40,7 @@ namespace Mods.Live2DTest
                 return;
             }
 
-            model = Live2DService.CreateModel(container, ModelPath, ModelNodeName, "live2d__avatar");
+            model = Live2DService.CreateModel(container, ModelPath, ModelNodeName, "live2d_base__avatar");
             if (model == null)
             {
                 GameLogger.Log("LIVE2D_TEST", "Live2DOverlay: model creation failed", LogLevel.Error);

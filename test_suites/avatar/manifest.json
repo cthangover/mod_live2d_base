@@ -17,7 +17,7 @@
     }
   ],
   "depends": [
-    "cthangover_story>=1",
+    "cthangover_game>=1",
     "ui_base>=1"
   ]
 }

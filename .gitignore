@@ -12,6 +12,7 @@ obj/
 gen/
 obj/
 bin/
+art_sources/
 
 *.tres~
 *.tscn~

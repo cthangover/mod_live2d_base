@@ -3,7 +3,7 @@
     "name": "Live2D Cubism",
     "version": "1.0.0",
     "author": "ct",
-    "description": "Live2D Cubism C# runtime: model loading, rendering, physics, animation, effects",
+    "description": "Live2D Cubism runtime for C#: drawn characters that breathe, blink and move with physics, playing the motions and expressions their artist made.",
     "category": "library, visual",
     "depends": ["ui_base>=1"],
     "depends_native": ["native/*.dll", "native/*.so"],

@@ -72,7 +72,7 @@ namespace Mods.Live2DTest
 
             GameLogger.Log("TEST", $"Live2DAvatarTestDriver: {passed} passed, {failed} failed");
             GameLogger.Log("TEST", $"[TEST_RESULT] name=live2d_avatar passed={passed} failed={failed}");
-            GetTree().Quit(failed == 0 ? 0 : 1);
+            Cthangover.Core.Bootstrap.ApplicationExit.Quit(GetTree(), failed == 0 ? 0 : 1);
         }
 
         private async System.Threading.Tasks.Task RunTest()

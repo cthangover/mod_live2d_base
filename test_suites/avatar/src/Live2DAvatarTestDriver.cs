@@ -8,6 +8,7 @@ using Godot;
 
 namespace Mods.Live2DTest
 {
+    using Cthangover.Mods.Interface.View;
     /// <summary>
     /// Интеграционный тест Live2D-аватара: создаёт модель через мод-пайплайн
     /// (тот же путь, что и <see cref="Live2DOverlay"/>), держит руки опущенными
@@ -38,9 +39,6 @@ namespace Mods.Live2DTest
 
         /// <summary>Пауза между кадрами проверки детерминизма.</summary>
         private const float StabilityGapSeconds = 0.4f;
-
-        /// <summary>Ожидание растеризации поднятой руки.</summary>
-        private const float RaisedSettleSeconds = 0.8f;
 
         /// <summary>Порог «далёкий от фона» пиксель силуэта, 0..1.</summary>
         private const float SilhouetteTolerance = 0.2f;
@@ -110,14 +108,14 @@ namespace Mods.Live2DTest
             model.SetLiveParameter(RightArmParam, rightArm.MinimumValue);
             await Delay(LoweredHoldSeconds);
 
-            var lowered = await Capture();
+            using var lowered = await Capture();
             await Delay(StabilityGapSeconds);
-            var stability = await Capture();
+            using var stability = await Capture();
 
             // Фаза 2 — поднимаем руку.
             model.SetLiveParameter(RightArmParam, rightArm.MaximumValue);
-            await Delay(RaisedSettleSeconds);
-            var raised = await Capture();
+            await WaitForRaisedParameter(model);
+            using var raised = await Capture();
 
             SavePng("01_lowered.png", lowered);
             SavePng("02_lowered_stability.png", stability);
@@ -196,17 +194,30 @@ namespace Mods.Live2DTest
                 Fail($"{RightArmParam} did not hold MaximumValue (value={armNow?.Value})");
         }
 
+        // The 1 s lowered hold and 0.4 s stability gap are assertions and stay above.
+        // Capture still waits its two real frames after the live parameter takes effect.
+        private async System.Threading.Tasks.Task WaitForRaisedParameter(CubismModelNode model)
+        {
+            var started = Godot.Time.GetTicksMsec();
+            while (true)
+            {
+                var arm = model.FindParameter(RightArmParam);
+                if (arm != null && System.Math.Abs(arm.Value - arm.MaximumValue) < 0.001f) return;
+                if (Godot.Time.GetTicksMsec() - started > 5000)
+                    throw new System.TimeoutException("raised arm parameter did not reach MaximumValue");
+                await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
+            }
+        }
+
         private async System.Threading.Tasks.Task Delay(float seconds) =>
             await ToSignal(GetTree().CreateTimer(seconds), SceneTreeTimer.SignalName.Timeout);
 
-        /// <summary>Ждёт обработки кадра и снимает вьюпорт в RGBA8.</summary>
+        /// <summary>Waits two real frames, then returns an owned sRGB capture; the caller disposes it.</summary>
         private async System.Threading.Tasks.Task<Image> Capture()
         {
             await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
             await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
-            var image = GetViewport().GetTexture().GetImage();
-            image.Convert(Image.Format.Rgba8);
-            return image;
+            return ViewportCapture.Take(GetViewport());
         }
 
         private void SavePng(string fileName, Image image)

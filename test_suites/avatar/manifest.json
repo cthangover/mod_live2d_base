@@ -18,6 +18,6 @@
   ],
   "depends": [
     "cthangover_game>=0.1.0",
-    "ui_base>=1"
+    "ui_base>=0.1.0"
   ]
 }

@@ -1,11 +1,11 @@
 {
   "runtimeTarget": {
-    "name": ".NETCoreApp,Version=v8.0",
+    "name": ".NETCoreApp,Version=v10.0",
     "signature": ""
   },
   "compilationOptions": {},
   "targets": {
-    ".NETCoreApp,Version=v8.0": {
+    ".NETCoreApp,Version=v10.0": {
       "Live2D/1.0.0": {
         "dependencies": {
           "Cthangover": "1.0.0"
@@ -155,8 +155,7 @@
           "Humanizer.Core": "2.2.0",
           "Microsoft.Bcl.AsyncInterfaces": "5.0.0",
           "Microsoft.CodeAnalysis.Common": "3.11.0",
-          "System.Composition": "1.0.31",
-          "System.IO.Pipelines": "5.0.1"
+          "System.Composition": "1.0.31"
         },
         "runtime": {
           "lib/netcoreapp3.1/Microsoft.CodeAnalysis.Workspaces.dll": {
@@ -203,6 +202,14 @@
           },
           "lib/netcoreapp3.1/zh-Hant/Microsoft.CodeAnalysis.Workspaces.resources.dll": {
             "locale": "zh-Hant"
+          }
+        }
+      },
+      "SharpCompress/0.50.7": {
+        "runtime": {
+          "lib/net10.0/SharpCompress.dll": {
+            "assemblyVersion": "0.50.7.0",
+            "fileVersion": "0.50.7.0"
           }
         }
       },
@@ -266,25 +273,18 @@
           }
         }
       },
-      "System.IO.Pipelines/5.0.1": {
-        "runtime": {
-          "lib/netcoreapp3.0/System.IO.Pipelines.dll": {
-            "assemblyVersion": "5.0.0.1",
-            "fileVersion": "5.0.120.57516"
-          }
-        }
-      },
       "Cthangover/1.0.0": {
         "dependencies": {
           "GodotSharp": "4.6.3",
           "GodotSharpEditor": "4.6.3",
           "Microsoft.CodeAnalysis.CSharp": "3.11.0",
-          "Microsoft.CodeAnalysis.Workspaces.Common": "3.11.0"
+          "Microsoft.CodeAnalysis.Workspaces.Common": "3.11.0",
+          "SharpCompress": "0.50.7"
         },
         "runtime": {
           "Cthangover.dll": {
-            "assemblyVersion": "1.0.0.0",
-            "fileVersion": "1.0.0.0"
+            "assemblyVersion": "0.0.0.0",
+            "fileVersion": "0.0.0.0"
           }
         }
       }
@@ -345,6 +345,13 @@
       "path": "microsoft.codeanalysis.workspaces.common/3.11.0",
       "hashPath": "microsoft.codeanalysis.workspaces.common.3.11.0.nupkg.sha512"
     },
+    "SharpCompress/0.50.7": {
+      "type": "package",
+      "serviceable": true,
+      "sha512": "sha512-amxjOlPKUFb33ohAVahPCCBHLtToYOOb6JGyM40q8DnT6KYoBLW1TtW6uLEXbv40S7ej6ikf6VmAXGBaFL6Klg==",
+      "path": "sharpcompress/0.50.7",
+      "hashPath": "sharpcompress.0.50.7.nupkg.sha512"
+    },
     "System.Composition/1.0.31": {
       "type": "package",
       "serviceable": true,
@@ -386,13 +393,6 @@
       "sha512": "sha512-0Zae/FtzeFgDBBuILeIbC/T9HMYbW4olAmi8XqqAGosSOWvXfiQLfARZEhiGd0LVXaYgXr0NhxiU1LldRP1fpQ==",
       "path": "system.composition.typedparts/1.0.31",
       "hashPath": "system.composition.typedparts.1.0.31.nupkg.sha512"
-    },
-    "System.IO.Pipelines/5.0.1": {
-      "type": "package",
-      "serviceable": true,
-      "sha512": "sha512-qEePWsaq9LoEEIqhbGe6D5J8c9IqQOUuTzzV6wn1POlfdLkJliZY3OlB0j0f17uMWlqZYjH7txj+2YbyrIA8Yg==",
-      "path": "system.io.pipelines/5.0.1",
-      "hashPath": "system.io.pipelines.5.0.1.nupkg.sha512"
     },
     "Cthangover/1.0.0": {
       "type": "project",
